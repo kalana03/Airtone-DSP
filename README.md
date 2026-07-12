@@ -1,4 +1,4 @@
-<img width="601" height="692" alt="AirTone DSP drawio" src="https://github.com/user-attachments/assets/0d4336aa-b5fd-4d2e-93e1-39012072ac05" /># Airtone-DSP
+# Airtone-DSP
 Semester 5 ICE project - A non-invasive, ultra-low-latency digital signal processing (DSP) system that brings the electronic expressiveness of an electric guitar to a standard classical acoustic guitar, completely wirelessly.
 
 ##### Module 1 - The Soundhole Transmitter
