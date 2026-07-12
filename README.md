@@ -40,4 +40,7 @@ Semester 5 ICE project - A non-invasive, ultra-low-latency digital signal proces
 ##### **Week 5:** Core DSP math functions
 - physical push-button and write the debounce logic to toggle the effects on and off manually.
 
-<img width="601" height="692" alt="AirTone DSP drawio" src="https://github.com/user-attachments/assets/aabee32f-543a-4887-beff-489d17f33a62" />
+### High Level Architecture Diagram
+
+<img width="601" height="692" alt="AirTone DSP drawio (1)" src="https://github.com/user-attachments/assets/5d72e898-87fb-48af-844d-49bb1b0f2b94" />
+
