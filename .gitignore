@@ -1,0 +1,10 @@
+# PlatformIO Ignore
+**/.pio/
+**/.vscode/
+
+# Mobile App Ignore
+**/node_modules/
+**/.expo/
+**/ios/Pods/
+**/android/.gradle/
+**/build/
