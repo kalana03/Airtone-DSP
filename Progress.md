@@ -52,5 +52,11 @@ After this modification, there was a clear difference between the previously obs
 ### Obtaining a primary raw audio output
 
 ##### Attempt 1:
-The transmitter sends 1 packet of audio data per loop through ESP-NOW and wait 100 microseconds (10000 Hz). Since the ESP-Now hardware can't support such a huge clock speed, it experienced significant packet loss. 
+The transmitter sends 1 packet of audio data per loop through ESP-NOW and wait 100 microseconds (10000 Hz). Since the ESP-Now hardware can't support such a huge clock speed, it experienced significant packet loss. Therefore, it created a sound like a machine gun as a result of sudden anomalies of the output signal, instead of a continuous signal.
+
+##### Attempt 2: 
+To counter the previous issue, we buffered the transmitting audio, and sent the buffer to the receiver, which was meant to reduce the number of times packets were transmitted per second. But it caused another problem; the transmitting amount of data per unit time, was too much for the audio output to play per unit time. Hence, although the output was a continous signal, it had a significant latency.
+
+##### Attempt 3:
+The queue memory was dropped by half the previous size. Then if the buffer is already full, the incoming packet was discarded instead of backlogging. The discarded 1 packet is not a recognizable difference for the human ear. Also the transmission interval was slightly increased, so that there is extra amount of time for the receiver to process & output the signal.
 
