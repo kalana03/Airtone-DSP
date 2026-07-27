@@ -35,6 +35,22 @@ MATLAB - to simulate the signal and view the results visually.
 
 I also found a C++ library which was implemented with DSP functions focused on music - Daisy SP.
 
+# Week 3
 
+### Integrating the pre-amp module
 
+The MCP6002 pre amp module was integrated to the circuit, so that the peizoelectric signal goes through the high impedence (through the pre amp) after leaving the resistor/capacitor bridge. 
+
+<img width="320" height="240" alt="image" src="https://github.com/user-attachments/assets/b946128c-38df-4abd-b751-65bb85f077a9" />
+
+After this modification, there was a clear difference between the previously observed signal and the new signal, indicating clear spikes when the guitar string is plucked. It also captures the different intensity levels of the sound as well.
+
+<img width="479" height="277" alt="Screenshot From 2026-07-26 12-36-51" src="https://github.com/user-attachments/assets/c789c697-51d8-42ba-b6cc-72be144a07e3" />
+
+<img width="479" height="277" alt="Screenshot From 2026-07-26 12-37-40" src="https://github.com/user-attachments/assets/83d3cd2b-6a87-43e8-8e08-b7a25065e410" />
+
+### Obtaining a primary raw audio output
+
+##### Attempt 1:
+The transmitter sends 1 packet of audio data per loop through ESP-NOW and wait 100 microseconds (10000 Hz). Since the ESP-Now hardware can't support such a huge clock speed, it experienced significant packet loss. 
 
