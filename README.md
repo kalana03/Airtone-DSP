@@ -26,14 +26,14 @@ Semester 5 ICE project - A non-invasive, ultra-low-latency digital signal proces
 ##### **Week 1 :** core software architecture and finalize component
 
 ##### **Week 2:** Transmitter
-- Capturing high-fidelity analog sound from the acoustic guitar.
-- amplification circuit
-- Connect the PCM1808 ADC to the ESP32-S3, Verifying conversion is successful.
-
-##### **Week 3:** Receiver
 - Connect the ESP32 to the PCM5102 DAC
 - ESP-NOW Handshake
 - Verify the clean, unprocessed audio
+
+##### **Week 3:** Receiver
+- Capturing high-fidelity analog sound from the acoustic guitar.
+- amplification circuit
+- Connect the MCP6002 to the ESP32-C3, Verifying conversion is successful.
 
 ##### **Week 4:** Mobile App UI & BLE Integration
 
