@@ -21,10 +21,10 @@
 // Based on your data, your noise floor peaks at ~50-60.
 // So gate threshold MUST be well above that to keep noise silent.
 // 
-#define GATE_THRESHOLD   150     // Well above noise floor of ~60
+#define GATE_THRESHOLD   50     // Well above noise floor of ~60
 #define GATE_RELEASE     0.90f   // Faster release (was 0.995 — too slow)
-#define LPF_ALPHA        0.30f
-#define DC_FILTER_R      0.995f
+#define LPF_ALPHA        0.40f
+#define DC_FILTER_R      0.998f
 #define OUTPUT_GAIN      15      // Fixed gain, no compressor
 
 typedef struct {
