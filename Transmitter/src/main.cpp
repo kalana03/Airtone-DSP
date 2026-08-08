@@ -1,40 +1,45 @@
 #include <Arduino.h>
-#include <esp_now.h>
-#include <WiFi.h>
 
-// Your Receiver's MAC Address
-uint8_t broadcastAddress[] = {0x70, 0x4B, 0xCA, 0x90, 0xE2, 0x50};
-
-#define BUFFER_SIZE 64
-typedef struct struct_message {
-    int16_t audioSamples[BUFFER_SIZE];
-} struct_message;
-
-struct_message audioData;
-esp_now_peer_info_t peerInfo;
-const int piezoPin = 1; 
+#define PIEZO_PIN 1
 
 void setup() {
-  Serial.begin(115200);
-  analogReadResolution(12);
-  
-  WiFi.mode(WIFI_STA);
-  if (esp_now_init() != ESP_OK) return;
-  
-  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-  peerInfo.channel = 0;  
-  peerInfo.encrypt = false;
-  esp_now_add_peer(&peerInfo);
+    Serial.begin(115200);
+    analogReadResolution(12);
+    
+    // Wait for ADC to settle
+    delay(500);
+    
+    Serial.println("Finding your ADC center...");
+    Serial.println("DO NOT touch or pluck the guitar");
+    Serial.println("Reading 2000 samples...");
+    
+    long sum = 0;
+    int minVal = 4095;
+    int maxVal = 0;
+    
+    for (int i = 0; i < 2000; i++) {
+        int raw = analogRead(PIEZO_PIN);
+        sum += raw;
+        if (raw < minVal) minVal = raw;
+        if (raw > maxVal) maxVal = raw;
+        delayMicroseconds(100);
+    }
+    
+    long center = sum / 2000;
+    
+    Serial.println("─────────────────────────────");
+    Serial.print("Your ADC center = ");
+    Serial.println(center);
+    Serial.print("Min value seen  = ");
+    Serial.println(minVal);
+    Serial.print("Max value seen  = ");
+    Serial.println(maxVal);
+    Serial.print("Noise floor     = ");
+    Serial.println(maxVal - minVal);
+    Serial.println("─────────────────────────────");
+    Serial.println("Copy the center number and tell me what it is.");
 }
 
 void loop() {
-  // Capture 64 samples at ~16kHz
-  for(int i = 0; i < BUFFER_SIZE; i++) {
-    audioData.audioSamples[i] = analogRead(piezoPin);
-    // 32us delay + 30us ADC read time = ~62.5us total (16,000 Hz)
-    delayMicroseconds(32); 
-  }
-  
-  // Blast the packet over the air
-  esp_now_send(broadcastAddress, (uint8_t *) &audioData, sizeof(audioData));
+    // Nothing
 }
