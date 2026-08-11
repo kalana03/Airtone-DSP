@@ -1,137 +1,162 @@
-/**
- * AirTone Receiver — Fixed Gate + Clean Amplification
- * 
- * Removed the broken compressor.
- * Uses a proper gate that STAYS CLOSED on noise.
- */
-
 #include <Arduino.h>
-#include <esp_now.h>
-#include <WiFi.h>
 #include <driver/i2s.h>
+#include <speex/speex_preprocess.h> 
 
-#define I2S_BCLK_PIN   26
-#define I2S_LRC_PIN    25
-#define I2S_DOUT_PIN   22
-#define BUFFER_SIZE    64
-#define SAMPLE_RATE_HZ 16000
+// Speaker DAC Wiring
+#define I2S_BCLK       26
+#define I2S_LRC        25
+#define I2S_DOUT       22
 
-// ─── TUNING PARAMETERS ───
-// 
-// Based on your data, your noise floor peaks at ~50-60.
-// So gate threshold MUST be well above that to keep noise silent.
-// 
-#define GATE_THRESHOLD   50     // Well above noise floor of ~60
-#define GATE_RELEASE     0.90f   // Faster release (was 0.995 — too slow)
-#define LPF_ALPHA        0.40f
-#define DC_FILTER_R      0.998f
-#define OUTPUT_GAIN      15      // Fixed gain, no compressor
+// Hardwired UART Pipeline
+HardwareSerial MySerial(2); 
+#define UART_RX_PIN 19 
+#define UART_TX_PIN 23 
 
-typedef struct {
-    int16_t samples[BUFFER_SIZE];
-} AudioPacket;
+#define FRAME_SIZE 160  
+#define SAMPLE_RATE 16000
 
-AudioPacket rxPacket;
+int16_t incomingSamples[FRAME_SIZE];
+int16_t speexFrame[FRAME_SIZE]; 
 
-float lpf_out       = 0.0f;
-float prev_input    = 0.0f;
-float dc_out        = 0.0f;
-float gate_envelope = 0.0f;
+// --- 1. Median Filter Variables ---
+float med_z1 = 0.0f;
+float med_z2 = 0.0f;
 
-void setupI2S() {
-    i2s_config_t i2s_config = {
-        .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate          = SAMPLE_RATE_HZ,
-        .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count        = 4,
-        .dma_buf_len          = BUFFER_SIZE,
-        .use_apll             = false,
-        .tx_desc_auto_clear   = true
-    };
+// --- 2. Float Filter Variables ---
+float dc_x_prev = 0.0f, dc_y_prev = 0.0f;
+const float DC_BLOCKER_R = 0.995f; 
 
-    i2s_pin_config_t pin_config = {
-        .bck_io_num   = I2S_BCLK_PIN,
-        .ws_io_num    = I2S_LRC_PIN,
-        .data_out_num = I2S_DOUT_PIN,
-        .data_in_num  = I2S_PIN_NO_CHANGE
-    };
+float hpf_x_prev = 0.0f, hpf_y_prev = 0.0f;
+const float HPF_ALPHA = 0.962f; 
 
-    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-    i2s_set_pin(I2S_NUM_0, &pin_config);
+// --- 3. Speex Variables ---
+SpeexPreprocessState *st;
+
+// --- DSP Math Functions ---
+
+// Fast 3-sample median sorter
+float median_of_3(float a, float b, float c) {
+    if ((a <= b && b <= c) || (c <= b && b <= a)) return b;
+    if ((b <= a && a <= c) || (c <= a && a <= b)) return a;
+    return c;
 }
 
-void onDataReceived(const uint8_t* mac, const uint8_t* data, int len) {
-    memcpy(&rxPacket, data, sizeof(AudioPacket));
+float dc_block(float x, float *x_prev, float *y_prev, float R) {
+    float y = x - *x_prev + R * (*y_prev);
+    *x_prev = x;
+    *y_prev = y;
+    return y;
+}
 
-    int16_t outBuffer[BUFFER_SIZE];
-    int32_t chunkPeak = 0;
-    float   cleanSignal[BUFFER_SIZE];
+float high_pass(float x, float *x_prev, float *y_prev, float alpha) {
+    float y = alpha * (*y_prev + x - *x_prev);
+    *x_prev = x;
+    *y_prev = y;
+    return y;
+}
 
-    // Pass 1: filter and find peak
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        float input = (float)rxPacket.samples[i];
+void audio_denoise_init(void) {
+    st = speex_preprocess_state_init(FRAME_SIZE, SAMPLE_RATE);
 
-        // Low-pass (kills hiss)
-        lpf_out = (LPF_ALPHA * input) + ((1.0f - LPF_ALPHA) * lpf_out);
+    int denoise = 1;
+    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_DENOISE, &denoise);
 
-        // DC removal (kills offset drift)
-        dc_out = lpf_out - prev_input + (DC_FILTER_R * dc_out);
-        prev_input = lpf_out;
+    int noise_suppress = -25; 
+    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &noise_suppress);
 
-        cleanSignal[i] = dc_out;
+    int agc = 1; 
+    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC, &agc);
 
-        int32_t absVal = (int32_t)fabsf(dc_out);
-        if (absVal > chunkPeak) chunkPeak = absVal;
-    }
+    float agc_level = 2000; 
+    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_AGC_LEVEL, &agc_level);
 
-    // Gate decision — STRICT threshold
-    // Only opens when we DEFINITELY have a signal, not noise
-    if (chunkPeak > GATE_THRESHOLD) {
-        gate_envelope = 1.0f;
-    } else {
-        gate_envelope *= GATE_RELEASE;
-    }
+    int vad = 1; 
+    speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_VAD, &vad);
+}
 
-    // Pass 2: gate + amplify
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        float gated = cleanSignal[i] * gate_envelope;
-        int32_t boosted = (int32_t)(gated * OUTPUT_GAIN);
+void setupI2S() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = SAMPLE_RATE, 
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT, 
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 4, // Kept low for minimum latency
+    .dma_buf_len = FRAME_SIZE,
+    .use_apll = false,
+    .tx_desc_auto_clear = true
+  };
 
-        if      (boosted >  32767) boosted =  32767;
-        else if (boosted < -32768) boosted = -32768;
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCLK,
+    .ws_io_num = I2S_LRC,
+    .data_out_num = I2S_DOUT,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
 
-        outBuffer[i] = (int16_t)boosted;
-    }
-
-    size_t bytes_written;
-    i2s_write(I2S_NUM_0, outBuffer, sizeof(outBuffer), &bytes_written, 0);
-
-    // Debug — show gate status clearly
-    static int counter = 0;
-    if (counter++ % 30 == 0) {
-        Serial.print("Peak=");
-        Serial.print(chunkPeak);
-        Serial.print("  Gate=");
-        Serial.print(gate_envelope > 0.1 ? "OPEN " : "SHUT ");
-        Serial.print("  Env=");
-        Serial.print(gate_envelope, 2);
-        Serial.print("  Out=");
-        Serial.println(outBuffer[0]);
-    }
+  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, &pin_config);
 }
 
 void setup() {
-    Serial.begin(115200);
-    Serial.println("[RX] Fixed gate version");
-    Serial.printf("Gate=%d  Gain=%d\n", GATE_THRESHOLD, OUTPUT_GAIN);
-    setupI2S();
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    esp_now_init();
-    esp_now_register_recv_cb(onDataReceived);
+  Serial.begin(115200);
+  MySerial.setRxBufferSize(2048); 
+  MySerial.begin(460800, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  
+  setupI2S();
+  audio_denoise_init(); 
+  Serial.println("🎧 DSP Pipeline: Median -> DC Block -> HPF -> Speex");
 }
 
-void loop() { delay(1); }
+void loop() {
+  
+  // The Elastic Flush: Dump old memory to snap back to real-time
+  if (MySerial.available() > 640) {
+    while(MySerial.available()) {
+      MySerial.read();
+    }
+  }
+
+  if (MySerial.available() >= 2) {
+    if (MySerial.read() == 0xAA) {
+      if (MySerial.read() == 0xBB) {
+        
+        while(MySerial.available() < sizeof(incomingSamples)) {
+           yield();
+        }
+        
+        MySerial.readBytes((char*)incomingSamples, sizeof(incomingSamples));
+        
+        for(int i = 0; i < FRAME_SIZE; i++) {
+          float raw = (float)incomingSamples[i];
+          
+          // Step 1: Median Filter (Kill single-sample pops BEFORE they ring)
+          float med_clean = median_of_3(raw, med_z1, med_z2);
+          
+          // Shift history for the next sample
+          med_z2 = med_z1;
+          med_z1 = raw; 
+          
+          // Step 2: DC Block
+          float dc_clean = dc_block(med_clean, &dc_x_prev, &dc_y_prev, DC_BLOCKER_R);
+          
+          // Step 3: High-Pass Filter
+          float hpf_clean = high_pass(dc_clean, &hpf_x_prev, &hpf_y_prev, HPF_ALPHA);
+          
+          speexFrame[i] = (int16_t)hpf_clean; 
+        }
+        
+        // Step 4: Speex Denoise & AGC
+        speex_preprocess_run(st, speexFrame); 
+        
+        // Step 5: Output to Speaker
+        size_t bytes_written;
+        i2s_write(I2S_NUM_0, speexFrame, sizeof(speexFrame), &bytes_written, 10);
+
+        Serial.print(">WiredAudio:");
+        Serial.println(speexFrame[0]); 
+      }
+    }
+  }
+}
