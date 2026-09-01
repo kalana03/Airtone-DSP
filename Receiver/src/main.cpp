@@ -6,6 +6,9 @@
 #include <BLEUtils.h>
 #include <BLEServer.h>
 
+#include <WiFi.h>
+#include <esp_now.h>
+
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define OVERDRIVE_CHAR_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
@@ -163,26 +166,99 @@ class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       std::string rxValue = pCharacteristic->getValue();
 
-      if (rxValue.length() > 0) {
-        // Convert the incoming string (e.g., "15.5") into a float
-        float newValue = atof(rxValue.c_str());
+      // Ensure the string is long enough to be a valid command (e.g., "G:5")
+      if (rxValue.length() >= 3) {
         
-        // Update the DSP engine live!
-        OVERDRIVE_DRIVE = newValue;
+        // 1. Extract the Tag (The first character at index 0)
+        char tag = rxValue[0];
         
-        Serial.print("📱 BLE Update! New Overdrive: ");
-        Serial.println(OVERDRIVE_DRIVE);
+        // 2. Extract the Number (Skip the tag and the colon, start reading at index 2)
+        float newValue = atof(rxValue.c_str() + 2);
+        
+        Serial.print("📱 BLE Update! Tag: [");
+        Serial.print(tag);
+        Serial.print("] | Value: ");
+        Serial.println(newValue);
+
+        // 3. Route the number to the correct audio variable
+        switch (tag) {
+          // Core Audio
+          case 'G': MANUAL_GAIN_MULTIPLIER = newValue; break;
+          case 'B': DC_BLOCKER_R = newValue; break;
+          
+          // Filters
+          case 'H': HPF_ALPHA = newValue; break;
+          case 'L': LPF_ALPHA = newValue; break;
+          
+          // Noise Gate
+          case 'T': GATE_THRESHOLD = newValue; break;
+          case 'E': ENV_SMOOTH = newValue; break;
+          case 'R': GATE_RELEASE_SPEED = newValue; break;
+          
+          // Speex DSP (Update the running engine directly to avoid memory leaks)
+          case 'N': 
+            SPEEX_DENOISE_ON = (int)newValue; 
+            speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_DENOISE, &SPEEX_DENOISE_ON);
+            break;
+          case 'S': 
+            SPEEX_NOISE_SUPPRESS_DB = (int)newValue; 
+            speex_preprocess_ctl(st, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &SPEEX_NOISE_SUPPRESS_DB);
+            break;
+            
+          // Tube Overdrive
+          case 'O': OVERDRIVE_ENABLED = (newValue > 0.5f); break; 
+          case 'D': OVERDRIVE_DRIVE = newValue; break;
+          case 'V': OVERDRIVE_OUTPUT_GAIN = newValue; break;
+          
+          // Stadium Delay
+          case 'Y': DELAY_ENABLED = (newValue > 0.5f); break;
+          case 'M': DELAY_MIX = newValue; break;
+          case 'F': DELAY_FEEDBACK = newValue; break;
+          
+          default: 
+            Serial.println("⚠️ Unknown command tag received!"); 
+            break;
+        }
       }
     }
 };
 
+typedef struct struct_message {
+  uint8_t packet_id;
+  int16_t audioSamples[80];
+} struct_message;
+
+volatile bool frame_ready = false;
+
+// This catches the packets flying through the air
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+  struct_message packet;
+  memcpy(&packet, incomingData, sizeof(packet));
+
+  if (packet.packet_id == 0) {
+    // Tape the first half of the pizza box to the first 80 slots
+    memcpy(&incomingSamples[0], packet.audioSamples, 80 * sizeof(int16_t));
+  } 
+  else if (packet.packet_id == 1) {
+    // Tape the second half to the last 80 slots
+    memcpy(&incomingSamples[80], packet.audioSamples, 80 * sizeof(int16_t));
+    // We have a full 160-sample frame! Tell the main loop to run the DSP.
+    frame_ready = true; 
+  }
+}
+
 void setup() {
   Serial.begin(115200);
-  MySerial.setRxBufferSize(2048); 
-  MySerial.begin(460800, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
-  
   setupI2S();
   audio_denoise_init(); 
+
+  // 1. Initialize Wi-Fi for ESP-NOW (MUST be done before BLE!)
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW Init Failed!");
+    return;
+  }
+  esp_now_register_recv_cb(OnDataRecv);
 
   // 1. Name your device
   BLEDevice::init("Airtone DSP");
@@ -197,7 +273,7 @@ void setup() {
   BLECharacteristic *pCharacteristic = pService->createCharacteristic(
                                          OVERDRIVE_CHAR_UUID,
                                          BLECharacteristic::PROPERTY_READ |
-                                         BLECharacteristic::PROPERTY_WRITE
+                                         BLECharacteristic::PROPERTY_WRITE_NR
                                        );
 
   // Attach our listener to the mailbox
@@ -215,22 +291,15 @@ void setup() {
 
 void loop() {
   
-  // The Elastic Flush: Dump old memory to kill latency
-  if (MySerial.available() > 640) {
-    while(MySerial.available()) {
-      MySerial.read();
-    }
-  }
+  if (frame_ready) {
+    frame_ready = false;
 
-  if (MySerial.available() >= 2) {
-    if (MySerial.read() == 0xAA) {
-      if (MySerial.read() == 0xBB) {
-        
-        while(MySerial.available() < sizeof(incomingSamples)) {
-           yield();
-        }
-        
-        MySerial.readBytes((char*)incomingSamples, sizeof(incomingSamples));
+    // 🚨 ADD THIS HEARTBEAT TRACKER 🚨
+    static unsigned long lastPrintTime = 0;
+    if (millis() - lastPrintTime > 500) { 
+      Serial.println("📶 [ESP-NOW] Audio Frame Received & Processing...");
+      lastPrintTime = millis();
+    }
         
         for(int i = 0; i < FRAME_SIZE; i++) {
           float raw = (float)incomingSamples[i];
@@ -346,8 +415,10 @@ void loop() {
           // ------------------------------------------------
 
           // 8. Hard clipping protector (Safety net)
-          if (final_audio > 32767.0f) final_audio = 32767.0f;
-          if (final_audio < -32768.0f) final_audio = -32768.0f;
+          // 8. Master Soft Limiter (Studio Compression)
+          // Normalizes the wave, curves the peaks gently using tanh, and scales it back.
+          float head_room = final_audio / 24000.0f; 
+          final_audio = 24000.0f * tanhf(head_room);
           
           speexFrame[i] = (int16_t)final_audio;
         }
@@ -363,6 +434,4 @@ void loop() {
         Serial.print(">WiredAudio:");
         Serial.println(speexFrame[0]); 
       }
-    }
-  }
 }

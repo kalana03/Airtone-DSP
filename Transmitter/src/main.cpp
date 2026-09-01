@@ -1,19 +1,25 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
+#include <WiFi.h>
+#include <esp_now.h>
 
 #define I2S_WS 4   
 #define I2S_SCK 5  
 #define I2S_SD 6   
 
-HardwareSerial MySerial(1); 
-#define UART_TX_PIN 7 
-#define UART_RX_PIN 8 
-
-// 🚨 MUST BE 160 to match the Receiver's Speex engine!
 #define BUFFER_SIZE 160 
-int16_t audioSamples[BUFFER_SIZE];
 
-const uint8_t syncWord[2] = {0xAA, 0xBB};
+// 🚨 REPLACE THIS WITH YOUR RECEIVER'S MAC ADDRESS 🚨
+uint8_t receiverAddress[] = {0x70, 0x4B, 0xCA, 0x90, 0xE2, 0x50};
+
+// The "Pizza Box": Holds half the audio (80 samples = 160 bytes) + an ID tag
+typedef struct struct_message {
+  uint8_t packet_id; // 0 for the first half, 1 for the second half
+  int16_t audioSamples[80];
+} struct_message;
+
+struct_message audioPacket;
+esp_now_peer_info_t peerInfo;
 
 void setupI2S() {
   i2s_config_t i2s_config = {
@@ -41,8 +47,22 @@ void setupI2S() {
 }
 
 void setup() {
-  MySerial.begin(460800, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  Serial.begin(115200);
   setupI2S();
+
+  // Start Wi-Fi in Station Mode (Required for ESP-NOW)
+  WiFi.mode(WIFI_STA);
+  
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // Register the receiver
+  memcpy(peerInfo.peer_addr, receiverAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
 }
 
 void loop() {
@@ -51,11 +71,17 @@ void loop() {
   
   i2s_read(I2S_NUM_0, &rawI2SData, sizeof(rawI2SData), &bytesIn, portMAX_DELAY);
   
-  for(int i = 0; i < BUFFER_SIZE; i++) {
-    audioSamples[i] = rawI2SData[i] >> 14; 
+  // 📦 PACKET 0: The first 80 samples
+  audioPacket.packet_id = 0;
+  for(int i = 0; i < 80; i++) {
+    audioPacket.audioSamples[i] = rawI2SData[i] >> 14; 
   }
-  
-  // Blast the Sync Word, then exactly 320 bytes of audio
-  MySerial.write(syncWord, 2);
-  MySerial.write((uint8_t *)audioSamples, sizeof(audioSamples));
+  esp_now_send(receiverAddress, (uint8_t *) &audioPacket, sizeof(audioPacket));
+
+  // 📦 PACKET 1: The remaining 80 samples
+  audioPacket.packet_id = 1;
+  for(int i = 0; i < 80; i++) {
+    audioPacket.audioSamples[i] = rawI2SData[i + 80] >> 14; 
+  }
+  esp_now_send(receiverAddress, (uint8_t *) &audioPacket, sizeof(audioPacket));
 }
