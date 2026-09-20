@@ -1,67 +1,76 @@
 import serial
-import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 
-# --- CONFIGURATION ---
-SERIAL_PORT = '/dev/ttyUSB0'  # Change to your ESP32 port
+# 🚨 Ensure this matches your Linux port!
+SERIAL_PORT = '/dev/ttyUSB0' 
 BAUD_RATE = 115200
-SAMPLE_RATE = 16000           # Match your I2S sample rate
-CHUNK_SIZE = 1024             # Number of samples to collect before drawing
 
-# Initialize serial connection
+raw_wave = []
+processed_wave = []
+dsp_exec_time = 0
+
+print(f"🎧 Listening on {SERIAL_PORT}... Play your guitar!")
+
 try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-except Exception as e:
-    print(f"Failed to open port {SERIAL_PORT}: {e}")
+    with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1) as ser:
+        while True:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            
+            if line == "START_PLOT":
+                print("📸 Snapshot received! Generating graph...")
+                raw_wave.clear()
+                processed_wave.clear()
+                
+                # ⏱️ Read the execution time first
+                time_line = ser.readline().decode('utf-8', errors='ignore').strip()
+                if time_line.startswith("TIME:"):
+                    try:
+                        dsp_exec_time = int(time_line.split(":")[1])
+                    except ValueError:
+                        dsp_exec_time = 0
+                
+                # Read the 160 audio samples
+                for _ in range(160):
+                    data = ser.readline().decode('utf-8', errors='ignore').strip()
+                    if data == "END_PLOT":
+                        break
+                    try:
+                        raw, processed = map(float, data.split(','))
+                        raw_wave.append(raw)
+                        processed_wave.append(processed)
+                    except ValueError:
+                        pass
+                
+                break # Exit loop to plot the data
+
+except serial.SerialException:
+    print("❌ Could not open serial port. Is the PlatformIO Serial Monitor closed?")
     exit()
 
-# Setup matplotlib figure
-fig, ax = plt.subplots(figsize=(10, 5))
-x_data = np.fft.rfftfreq(CHUNK_SIZE, d=1.0/SAMPLE_RATE)
-line, = ax.plot(x_data, np.zeros(len(x_data)), color='blue')
+# 🧮 Calculate actual time in milliseconds for the X-axis
+# At 16000 Hz, each sample is 1/16000 seconds (0.0625 milliseconds)
+time_axis_ms = [i * (1000.0 / 16000.0) for i in range(len(raw_wave))]
 
-ax.set_title("Live Audio Frequency Spectrum")
-ax.set_xlabel("Frequency (Hz)")
-ax.set_ylabel("Amplitude")
-ax.set_xlim(0, 8000)  # Nyquist limit for 16kHz is 8000Hz
-ax.set_ylim(0, 100000) # Adjust this if the wave is too tall or short
+# 📊 Generate the Publication-Ready Plot
+plt.figure(figsize=(10, 5))
 
-audio_buffer = []
+# Make the blue line thicker
+plt.plot(time_axis_ms, raw_wave, label='Original Waveform (Raw Input)', color='blue', alpha=0.8, linewidth=4)
 
-def update(frame):
-    global audio_buffer
-    
-    # Read lines from serial until we have enough for a chunk
-    while ser.in_waiting:
-        try:
-            line_bytes = ser.readline().decode('utf-8').strip()
-            # Hunt for our specific Teleplot prefix
-            if line_bytes.startswith('>WiredAudio:'):
-                value = int(line_bytes.split(':')[1])
-                audio_buffer.append(value)
-        except Exception:
-            pass # Ignore corrupted serial lines
-            
-    # Once we have enough samples, run the FFT
-    if len(audio_buffer) >= CHUNK_SIZE:
-        # Convert to numpy array and grab the latest chunk
-        data = np.array(audio_buffer[-CHUNK_SIZE:])
-        audio_buffer = [] # clear buffer
-        
-        # Apply a Hanning window to prevent frequency bleeding
-        windowed_data = data * np.hanning(CHUNK_SIZE)
-        
-        # Calculate FFT (absolute value to get magnitudes)
-        fft_result = np.abs(np.fft.rfft(windowed_data))
-        
-        # Update the graph line
-        line.set_ydata(fft_result)
-        
-    return line,
+# Make the red line dashed so we can see through it (The "X-Ray" fix)
+plt.plot(time_axis_ms, processed_wave, label='Modified Waveform (DSP Output)', color='red', alpha=1.0, linewidth=2, linestyle='--')
 
-# Run the animation loop
-ani = FuncAnimation(fig, update, interval=50, blit=True)
+# Add the execution time dynamically to the title!
+plt.title(f'Real-Time DSP Signal Processing (Execution Time: {dsp_exec_time} μs)', fontsize=14, fontweight='bold')
+plt.xlabel('Time (milliseconds)', fontsize=12)
+plt.ylabel('Amplitude', fontsize=12)
+plt.axhline(0, color='black', linewidth=0.8, linestyle='--')
+
+# Set the X-axis limits perfectly to the 10ms frame
+plt.xlim(0, 10) 
+
+plt.legend(loc='upper right')
+plt.grid(True, linestyle=':', alpha=0.6)
+plt.tight_layout()
+
 plt.show()
-
-ser.close()

@@ -2,6 +2,7 @@
 #include <driver/i2s.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h> // Added for Wi-Fi channel locking
 
 #define I2S_WS 4   
 #define I2S_SCK 5  
@@ -50,8 +51,11 @@ void setup() {
   Serial.begin(115200);
   setupI2S();
 
-  // Start Wi-Fi in Station Mode (Required for ESP-NOW)
+  // Start Wi-Fi in Station Mode and explicitly lock to Channel 1
   WiFi.mode(WIFI_STA);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
   
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error initializing ESP-NOW");
@@ -60,7 +64,7 @@ void setup() {
 
   // Register the receiver
   memcpy(peerInfo.peer_addr, receiverAddress, 6);
-  peerInfo.channel = 0;  
+  peerInfo.channel = 1;  // Updated to match the locked Wi-Fi channel
   peerInfo.encrypt = false;
   esp_now_add_peer(&peerInfo);
 }
@@ -68,20 +72,25 @@ void setup() {
 void loop() {
   int32_t rawI2SData[BUFFER_SIZE];
   size_t bytesIn = 0;
+  esp_err_t result;
+  static int drop_counter = 0;
   
   i2s_read(I2S_NUM_0, &rawI2SData, sizeof(rawI2SData), &bytesIn, portMAX_DELAY);
   
-  // 📦 PACKET 0: The first 80 samples
-  audioPacket.packet_id = 0;
-  for(int i = 0; i < 80; i++) {
-    audioPacket.audioSamples[i] = rawI2SData[i] >> 14; 
-  }
-  esp_now_send(receiverAddress, (uint8_t *) &audioPacket, sizeof(audioPacket));
+  drop_counter++;
 
-  // 📦 PACKET 1: The remaining 80 samples
+  // 📦 PACKET 0 (The Target for the 5% Drop)
+  audioPacket.packet_id = 0;
+for(int i = 0; i < 80; i++) {
+  audioPacket.audioSamples[i] = rawI2SData[i] >> 14; 
+}
+result = esp_now_send(receiverAddress, (uint8_t *) &audioPacket, sizeof(audioPacket));
+if (result != ESP_OK) delay(1);
+  // 📦 PACKET 1 (Always sent so the receiver triggers the check)
   audioPacket.packet_id = 1;
   for(int i = 0; i < 80; i++) {
     audioPacket.audioSamples[i] = rawI2SData[i + 80] >> 14; 
   }
-  esp_now_send(receiverAddress, (uint8_t *) &audioPacket, sizeof(audioPacket));
+  result = esp_now_send(receiverAddress, (uint8_t *) &audioPacket, sizeof(audioPacket));
+  if (result != ESP_OK) delay(1); 
 }
